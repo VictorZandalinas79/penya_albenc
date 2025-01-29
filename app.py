@@ -1,181 +1,281 @@
 import dash
-from dash import html, dcc, Input, Output, State
+from dash import dcc, html, Input, Output, State, MATCH, ALL
+from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
+from flask_login import LoginManager, UserMixin, login_user, logout_user, current_user
 import pandas as pd
 from datetime import datetime
 import json
-import os
-from flask_login import LoginManager, UserMixin, login_user, logout_user, current_user
-from werkzeug.security import generate_password_hash, check_password_hash
+from flask import Flask
 
-# Inicialización de la app
-app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
-server = app.server  # Necesario para Render
+# Inicializar la aplicación Flask
+server = Flask(__name__)
+server.config.update(SECRET_KEY='tu_clave_secreta_aqui')
 
-# Configuración de autenticación
-server.config.update(
-    SECRET_KEY='tu_clave_secreta'
+# Inicializar la aplicación Dash
+app = dash.Dash(
+    __name__, 
+    server=server, 
+    external_stylesheets=[dbc.themes.BOOTSTRAP],
+    suppress_callback_exceptions=True
 )
 
-# Login manager
+# Configurar Flask-Login
 login_manager = LoginManager()
 login_manager.init_app(server)
 login_manager.login_view = '/login'
 
-# Clase Usuario
+# Clase de Usuario
 class User(UserMixin):
     def __init__(self, username):
         self.id = username
-        self.username = username
-
-# Cargar usuarios desde CSV
-def load_users():
-    try:
-        df = pd.read_csv('data/usuarios.csv')
-        return {row['username']: row['password'] for _, row in df.iterrows()}
-    except:
-        return {'admin': generate_password_hash('admin')}  # Usuario por defecto
-
-USERS_DB = load_users()
 
 @login_manager.user_loader
 def load_user(username):
-    if username not in USERS_DB:
-        return None
     return User(username)
 
+def load_data():
+    try:
+        users_df = pd.read_csv('data/usuarios.csv')
+        events_df = pd.read_csv('data/eventos.csv')
+        maintenance_df = pd.read_csv('data/mantenimiento.csv')
+        inventory_df = pd.read_csv('data/inventario.csv')
+        return users_df, events_df, maintenance_df, inventory_df
+    except Exception as e:
+        print(f"Error cargando datos: {str(e)}")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+def create_event_card(event, index):
+    return dbc.Card([
+        dbc.CardHeader(
+            html.H5(f"{event['nombre']} - {event['fecha']}", className="mb-0")
+        ),
+        dbc.CardBody([
+            html.Div([
+                html.Strong("Turno actual: "),
+                html.Span(event['turno'], className="me-2"),
+                dbc.Button(
+                    "Cambiar turno",
+                    id={'type': 'event-button', 'index': index},
+                    color="primary",
+                    size="sm"
+                )
+            ])
+        ])
+    ], className="mb-3")
+
+def create_inventory_item(item, index):
+    return dbc.ListGroupItem([
+        html.Div([
+            html.Span(item['item']),
+            html.Small(
+                f" (Añadido: {item['fecha']})",
+                className="text-muted ms-2"
+            ),
+            dbc.Button(
+                "×",
+                id={'type': 'delete-item', 'index': index},
+                color="danger",
+                size="sm",
+                className="float-end"
+            )
+        ])
+    ])
+
+# Layout de login
+login_layout = html.Div([
+    dbc.Container([
+        html.H1("Penya L'Albenc - Login", className="text-center mt-4"),
+        dbc.Row([
+            dbc.Col([
+                dbc.Input(id="username-input", placeholder="Usuario", type="text", className="mb-2"),
+                dbc.Input(id="password-input", placeholder="Contraseña", type="password", className="mb-2"),
+                dbc.Button("Iniciar Sesión", id="login-button", color="primary", className="mt-2 w-100"),
+                html.Div(id="login-error", className="text-danger mt-2")
+            ], width={"size": 6, "offset": 3})
+        ])
+    ])
+])
+
 # Layout principal
+def create_main_layout():
+    try:
+        events_df = pd.read_csv('data/eventos.csv')
+        users_df = pd.read_csv('data/usuarios.csv')
+        inventory_df = pd.read_csv('data/inventario.csv')
+        user_options = [{'label': user, 'value': user} for user in users_df['username']]
+    except Exception as e:
+        print(f"Error cargando datos: {str(e)}")
+        events_df = pd.DataFrame()
+        inventory_df = pd.DataFrame()
+        user_options = []
+    
+    layout = html.Div([
+        # Navbar
+        dbc.NavbarSimple(
+            children=[
+                dbc.NavItem(dbc.NavLink("Calendario", href="#")),
+                dbc.NavItem(dbc.NavLink("Tablón", href="#")),
+                dbc.NavItem(dbc.NavLink("Cerrar Sesión", id="logout-button", href="#")),
+            ],
+            brand="Penya L'Albenc",
+            color="primary",
+            dark=True,
+        ),
+        
+        # Contenido principal
+        dbc.Container([
+            dbc.Row([
+                # Columna de Eventos
+                dbc.Col([
+                    html.H2("Calendario de Eventos", className="mt-4"),
+                    html.Div([
+                        create_event_card(row, idx) 
+                        for idx, row in events_df.iterrows()
+                    ])
+                ], md=6),
+                
+                # Columna del Tablón
+                dbc.Col([
+                    html.H2("Tablón de Anuncios", className="mt-4"),
+                    dbc.InputGroup([
+                        dbc.Input(
+                            id="new-item-input",
+                            placeholder="Añadir nuevo item...",
+                            type="text"
+                        ),
+                        dbc.Button(
+                            "Añadir",
+                            id="add-item-button",
+                            color="success"
+                        )
+                    ], className="mb-3"),
+                    dbc.ListGroup([
+                        create_inventory_item(row, idx)
+                        for idx, row in inventory_df.iterrows()
+                    ])
+                ], md=6)
+            ]),
+            
+            # Modal para cambios de turno
+            dbc.Modal([
+                dbc.ModalHeader(dbc.ModalTitle("Cambiar turno")),
+                dbc.ModalBody([
+                    dbc.Select(
+                        id='user-select',
+                        options=user_options,
+                        placeholder="Selecciona usuario para intercambiar"
+                    )
+                ]),
+                dbc.ModalFooter([
+                    dbc.Button("Cancelar", id="cancel-button", className="me-2"),
+                    dbc.Button("Confirmar", id="confirm-button", color="primary")
+                ])
+            ], id="change-modal", is_open=False),
+            
+            # Toast para notificaciones
+            dbc.Toast(
+                id="notification-toast",
+                header="Notificación",
+                is_open=False,
+                dismissable=True,
+                duration=4000,
+                style={"position": "fixed", "top": 66, "right": 10, "width": 350},
+            )
+        ])
+    ])
+    
+    return layout
+
+# Layout principal de la aplicación
 app.layout = html.Div([
-    dcc.Location(id='url', refresh=False),
-    dcc.Store(id='notification-store', data=[]),
+    dcc.Location(id='url', refresh=True),
+    dcc.Store(id='authentication-status', storage_type='session'),
+    dcc.Store(id='app-state', storage_type='memory', data={'inventory': [], 'last_action': None}),
+    dcc.Store(id='modal-state', storage_type='memory', data={'open': False, 'selected_event': None}),
     html.Div(id='page-content'),
-    dcc.Interval(
-        id='interval-component',
-        interval=5*1000,  # en milisegundos
-        n_intervals=0
+    dbc.Toast(
+        id="notification-toast",
+        header="Notificación",
+        is_open=False,
+        dismissable=True,
+        duration=4000,
+        style={"position": "fixed", "top": 66, "right": 10, "width": 350},
     )
 ])
 
-# Página de login
-login_layout = dbc.Container([
-    dbc.Row([
-        dbc.Col([
-            html.H2("Iniciar Sesión", className="text-center mb-4"),
-            dbc.Card([
-                dbc.CardBody([
-                    dbc.Input(id="username", placeholder="Usuario", type="text", className="mb-3"),
-                    dbc.Input(id="password", placeholder="Contraseña", type="password", className="mb-3"),
-                    dbc.Button("Entrar", id="login-button", color="primary", className="w-100"),
-                    html.Div(id="login-error")
-                ])
-            ])
-        ], width=6)
-    ], justify="center", className="vh-100 align-items-center")
-])
+# Callback para actualizar el estado visible del modal
+@app.callback(
+    Output("change-modal", "is_open"),
+    Input("modal-state", "data")
+)
+def update_modal_state(modal_state):
+    if modal_state:
+        return modal_state.get('open', False)
+    return False
 
-# Página principal
-def serve_layout():
-    # Cargar datos de turnos
-    try:
-        turnos_df = pd.read_csv('data/turnos.csv')
-        turnos = turnos_df.to_dict('records')
-    except:
-        turnos = []
-    
-    return dbc.Container([
-        dbc.Navbar([
-            dbc.NavbarBrand("Calendario de Cocina"),
-            dbc.Nav([
-                dbc.NavItem(
-                    dbc.Button(
-                        html.I(className="fas fa-bell"),
-                        id="notification-button",
-                        color="link"
-                    )
-                ),
-                dbc.NavItem(
-                    dbc.Button("Salir", id="logout-button", color="link")
-                )
-            ])
-        ], color="light", className="mb-4"),
-        
-        dbc.Row([
-            dbc.Col([
-                dcc.Calendar(
-                    id='calendar',
-                    className='calendar',
-                    month_format='MMMM Y',
-                    display_mode='month',
-                    day_size=50,
-                    first_day_of_week=1,
-                    with_full_screen_portal=True
-                )
-            ], width=8),
-            
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader("Items Faltantes"),
-                    dbc.CardBody([
-                        dbc.Input(id="new-item", placeholder="Agregar item...", type="text"),
-                        dbc.Button("Agregar", id="add-item-button", color="primary", className="mt-2"),
-                        html.Div(id="items-list", className="mt-3")
-                    ])
-                ])
-            ], width=4)
-        ]),
-        
-        dbc.Modal([
-            dbc.ModalHeader("Notificaciones"),
-            dbc.ModalBody(id="notifications-content"),
-            dbc.ModalFooter(
-                dbc.Button("Cerrar", id="close-notifications", className="ml-auto")
-            )
-        ], id="notifications-modal"),
-        
-    ], fluid=True)
+# Callback para actualizar usuario seleccionado en el modal
+@app.callback(
+    Output("user-select", "value"),
+    [Input("change-modal", "is_open")],
+    prevent_initial_call=True
+)
+def reset_dropdown(is_open):
+    if not is_open:
+        return None
+    raise PreventUpdate
 
-# Callbacks
+# Callback para mostrar la página
 @app.callback(
     Output('page-content', 'children'),
-    Input('url', 'pathname')
+    [Input('url', 'pathname'),
+     Input('authentication-status', 'data'),
+     Input('app-state', 'data')]
 )
-def display_page(pathname):
-    if pathname == '/login' or not current_user.is_authenticated:
-        return login_layout
-    return serve_layout()
-
-@app.callback(
-    [Output("login-error", "children"), Output("url", "pathname")],
-    Input("login-button", "n_clicks"),
-    [State("username", "value"), State("password", "value")],
-    prevent_initial_call=True
-)
-def login_callback(n_clicks, username, password):
-    if username in USERS_DB and check_password_hash(USERS_DB[username], password):
-        login_user(User(username))
-        return "", "/"
-    return dbc.Alert("Usuario o contraseña incorrectos", color="danger"), "/login"
-
-@app.callback(
-    Output("url", "pathname", allow_duplicate=True),
-    Input("logout-button", "n_clicks"),
-    prevent_initial_call=True
-)
-def logout_callback(n_clicks):
-    if n_clicks:
+def display_page(pathname, auth_status, app_state):
+    if pathname == '/logout':
         logout_user()
-        return "/login"
+        return login_layout
+    
+    if auth_status and auth_status.get('authenticated'):
+        return create_main_layout()
+        
+    return login_layout
 
+# Callback para autenticación
 @app.callback(
-    Output("notifications-modal", "is_open"),
-    [Input("notification-button", "n_clicks"),
-     Input("close-notifications", "n_clicks")],
-    [State("notifications-modal", "is_open")],
+    [Output('authentication-status', 'data'),
+     Output('url', 'pathname')],
+    [Input('login-button', 'n_clicks')],
+    [State('username-input', 'value'),
+     State('password-input', 'value')]
 )
-def toggle_modal(n1, n2, is_open):
-    if n1 or n2:
-        return not is_open
-    return is_open
+def authenticate(n_clicks, username, password):
+    if n_clicks is None:
+        raise PreventUpdate
+    
+    if not username or not password:
+        return None, '/login'
+    
+    users_df = pd.read_csv('data/usuarios.csv')
+    user = users_df[users_df['username'] == username]
+    
+    if user.empty or user.iloc[0]['password'] != password:
+        return None, '/login'
+    
+    login_user(User(username))
+    return {'authenticated': True, 'username': username}, '/dashboard'
+
+# Callback para el logout
+@app.callback(
+    Output('url', 'pathname', allow_duplicate=True),
+    Input('logout-button', 'n_clicks'),
+    prevent_initial_call=True
+)
+def handle_logout(n_clicks):
+    if n_clicks:
+        return '/logout'
+    raise PreventUpdate
 
 if __name__ == '__main__':
     app.run_server(debug=True)
